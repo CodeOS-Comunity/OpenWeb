@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenWeb Browser</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="browser-shell">
+      <header class="chrome-bar">
+        <form id="navigation-form" class="navigation-form">
+          <button type="button" class="nav-button" id="back-button">←</button>
+          <button type="button" class="nav-button" id="forward-button">→</button>
+          <div class="address-box">
+            <span class="lock">🔒</span>
+            <input id="address-bar" type="text" value="https://codeos.dev" autocomplete="off" />
+          </div>
+          <button type="submit" class="go-button">Go</button>
+          <button type="button" class="tab-action" id="new-tab-button">＋ Tab</button>
+        </form>
+        <div class="engine-picker">
+          <label for="engine-select">Search</label>
+          <select id="engine-select">
+            <option value="google">Google</option>
+            <option value="ddg">DuckDuckGo</option>
+          </select>
+        </div>
+      </header>
+
+      <section class="tab-row" id="tab-row"></section>
+
+      <main class="browser-body">
+        <iframe id="browser-view" title="OpenWeb view" src="/render?target=https%3A%2F%2Fcodeos.dev"></iframe>
+      </main>
+
+      <footer class="status-bar">
+        <span id="status-text">HTTPS tabbed rendering ready</span>
+        <span>Secure • Google primary • DuckDuckGo backup</span>
+      </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
