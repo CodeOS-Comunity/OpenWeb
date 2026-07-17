@@ -1,4 +1,4 @@
-# OpenWeb
+OpenWeb
 OpenWeb is now a native desktop browser prototype for CodeOS.
 
 Run it with:
