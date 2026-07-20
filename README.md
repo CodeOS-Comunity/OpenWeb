@@ -1,4 +1,8 @@
-OpenWeb
+# OPENWEB WILL NOW INCLUDE A LINUX VERSION SINCE IT IS WRITTEN IN RUST
+
+# OpenWeb
+
+# Description 
 OpenWeb is now a native desktop browser prototype for CodeOS.
 
 Run it with:
