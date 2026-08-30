@@ -3,11 +3,13 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -17,6 +19,7 @@
 #define PORT 3000
 #define REQUEST_SIZE 16384
 #define RESPONSE_SIZE 262144
+#define OW_MAX_REDIRECTS 8
 
 static void send_body(int client, const char *status, const char *type,
                       const void *body, size_t length) {
@@ -96,20 +99,6 @@ static void url_decode(const char *input, char *output, size_t output_size) {
     output[used] = '\0';
 }
 
-static void normalize_url(const char *input, char *output, size_t output_size) {
-    while (isspace((unsigned char)*input)) input++;
-    if (strncmp(input, "http://", 7) == 0 || strncmp(input, "https://", 8) == 0) {
-        snprintf(output, output_size, "%s", input);
-    } else {
-        snprintf(output, output_size, "https://%s", input);
-    }
-}
-
-static int looks_like_url(const char *input) {
-    return strstr(input, "://") || strstr(input, "localhost") ||
-           strstr(input, "127.") || (strchr(input, '.') && !strchr(input, ' '));
-}
-
 static void json_string(const char *body, const char *key, char *output,
                         size_t output_size) {
     char marker[64];
@@ -162,28 +151,89 @@ static void serve_file(int client, const char *path) {
     free(body);
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   URL classification — mirrors kernel/kernel/rust_ow/src/lib.rs
+   (is_unreserved / has_known_scheme / is_likely_url / ensure_scheme).
+   A bare word with no dot is a search query; a dotted/hosted string or a
+   known scheme is navigated directly with an "http://" scheme default.
+   ═══════════════════════════════════════════════════════════════════ */
+
+static int is_unreserved(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~';
+}
+
+static int has_known_scheme(const char *url) {
+    return strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0 ||
+           strncmp(url, "file://", 7) == 0 || strncmp(url, "data://", 7) == 0;
+}
+
+static int is_likely_url(const char *input) {
+    size_t i;
+    if (!input || !input[0]) return 0;
+    if (has_known_scheme(input)) return 1;
+    if (strncmp(input, "localhost", 9) == 0) return 1;
+    for (i = 0; input[i]; i++)
+        if (isspace((unsigned char)input[i]) || iscntrl((unsigned char)input[i]))
+            return 0;
+    return strchr(input, '.') != NULL;
+}
+
+static void ensure_scheme(char *url, size_t size) {
+    size_t len;
+    if (!url[0] || has_known_scheme(url)) return;
+    len = strlen(url);
+    if (len + 7 >= size) return;
+    memmove(url + 7, url, len + 1);
+    memcpy(url, "http://", 7);
+}
+
+/* RFC 3986 percent-encoding of a query string — same rule as rust_ow's
+ * build_search_url: unreserved characters pass through, everything else
+ * becomes %XX (uppercase hex). */
+static void percent_encode_query(const char *input, char *output, size_t output_size) {
+    size_t i, used = 0;
+    for (i = 0; input[i] && used + 3 < output_size; i++) {
+        unsigned char c = (unsigned char)input[i];
+        if (is_unreserved((char)c)) output[used++] = (char)c;
+        else {
+            output[used++] = '%';
+            output[used++] = "0123456789ABCDEF"[c >> 4];
+            output[used++] = "0123456789ABCDEF"[c & 0x0F];
+        }
+    }
+    output[used] = '\0';
+}
+
+/* Search URL builder. Defaults to the same Google endpoint as the kernel
+ * (http://www.google.com/search?q=). "ddg" is an opt-in alternative. */
+static void build_engine_url(const char *query, const char *engine,
+                             char *url, size_t url_size) {
+    char encoded[2000];
+    percent_encode_query(query, encoded, sizeof(encoded));
+    if (strcmp(engine, "ddg") == 0)
+        snprintf(url, url_size, "https://duckduckgo.com/html/?q=%s", encoded);
+    else
+        snprintf(url, url_size, "http://www.google.com/search?q=%s", encoded);
+}
+
 static void serve_search(int client, const char *body) {
     char query[2048] = "";
     char engine[32] = "google";
     char url[4096];
     json_string(body, "query", query, sizeof(query));
     json_string(body, "engine", engine, sizeof(engine));
-    if (looks_like_url(query)) {
-        normalize_url(query, url, sizeof(url));
+    if (is_likely_url(query)) {
+        snprintf(url, sizeof(url), "%s", query);
+        ensure_scheme(url, sizeof(url));
     } else {
-        char encoded[2048] = "";
-        size_t used = 0;
-        for (size_t i = 0; query[i] && used + 1 < sizeof(encoded); i++) {
-            encoded[used++] = query[i] == ' ' ? '+' : query[i];
-        }
-        encoded[used] = '\0';
-        snprintf(url, sizeof(url), "https://%s.com/search?q=%s",
-                 strcmp(engine, "ddg") == 0 ? "duckduckgo" : "www.google", encoded);
+        build_engine_url(query, engine, url, sizeof(url));
     }
     char response[8192];
-    const char *selected_engine = looks_like_url(query) ? "https" :
-        (strcmp(engine, "ddg") == 0 ? "duckduckgo" : "google");
-    const char *mode = looks_like_url(query) ? "direct" : "search";
+    int direct = is_likely_url(query);
+    const char *selected_engine = direct ? (strncmp(url, "https://", 8) == 0 ? "https" : "http")
+                                         : (strcmp(engine, "ddg") == 0 ? "duckduckgo" : "google");
+    const char *mode = direct ? "direct" : "search";
     char safe_query[4096], safe_url[8192];
     json_escape(query, safe_query, sizeof(safe_query));
     json_escape(url, safe_url, sizeof(safe_url));
@@ -193,9 +243,245 @@ static void serve_search(int client, const char *body) {
     send_text(client, "200 OK", "application/json; charset=utf-8", response);
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   Fetching — mirrors kernel/kernel/rust_ow/src/lib.rs classify_and_fetch:
+   GET over a plain TCP socket, status parsing, a bounded redirect chain
+   (up to OW_MAX_REDIRECTS), and the same failure statuses the kernel tab
+   shows ("IP needed:", "No data:", "HTTP error N", "Too many redirects",
+   "Redirect without Location").
+   ═══════════════════════════════════════════════════════════════════ */
+
+static int parse_host_port_path(const char *url, char *host, size_t host_size,
+                                unsigned short *port, char *path, size_t path_size) {
+    const char *rest = strstr(url, "://");
+    const char *slash;
+    const char *colon;
+    int is_https = strncmp(url, "https://", 8) == 0;
+    size_t hl;
+    if (rest) rest += 3; else rest = url;
+    slash = strchr(rest, '/');
+    hl = slash ? (size_t)(slash - rest) : strlen(rest);
+    if (!hl || hl >= host_size) return -1;
+    memcpy(host, rest, hl);
+    host[hl] = '\0';
+    *port = is_https ? 443 : 80;
+    colon = strrchr(host, ':');
+    if (colon) {
+        int explicit_port = atoi(colon + 1);
+        if (explicit_port > 0 && explicit_port <= 65535) *port = (unsigned short)explicit_port;
+        host[colon - host] = '\0';
+    }
+    if (slash) {
+        size_t pl = strlen(slash);
+        if (pl >= path_size) pl = path_size - 1;
+        memcpy(path, slash, pl);
+        path[pl] = '\0';
+    } else {
+        path[0] = '/';
+        path[1] = '\0';
+    }
+    return 0;
+}
+
+/* Resolve a (possibly relative / scheme-relative) Location header against the
+ * current URL. Unlike rust_ow's resolver (which keeps only scheme://host), this
+ * joins path-relative locations against the current directory. */
+static int resolve_location(const char *cur, const char *loc, char *out, size_t out_size) {
+    const char *scheme_end, *auth_start, *slash;
+    if (!loc || !loc[0]) return 0;
+    if (has_known_scheme(loc) || strncmp(loc, "//", 2) == 0) {
+        snprintf(out, out_size, "%s", loc);
+        return 1;
+    }
+    scheme_end = strstr(cur, "://");
+    if (!scheme_end) { snprintf(out, out_size, "%s", loc); return 1; }
+    scheme_end += 3;
+    auth_start = scheme_end;
+    slash = strchr(auth_start, '/');
+    if (loc[0] == '/') {
+        size_t auth_end = slash ? (size_t)(slash - cur) : strlen(cur);
+        snprintf(out, out_size, "%.*s%s", (int)auth_end, cur, loc);
+        return 1;
+    }
+    {
+        const char *cut = slash ? slash + 1 : (auth_start + strlen(auth_start));
+        snprintf(out, out_size, "%.*s%s", (int)(cut - cur), cur, loc);
+        return 1;
+    }
+}
+
+static int parse_http_status(const char *data, size_t len) {
+    if (len < 12 || strncmp(data, "HTTP/", 5) != 0) return 0;
+    if (data[9] < '0' || data[9] > '9') return 0;
+    return (data[9] - '0') * 100 + (data[10] - '0') * 10 + (data[11] - '0');
+}
+
+static size_t header_body_boundary(const char *data, size_t len) {
+    size_t i;
+    for (i = 0; i + 3 < len; i++)
+        if (data[i] == '\r' && data[i + 1] == '\n' &&
+            data[i + 2] == '\r' && data[i + 3] == '\n')
+            return i + 4;
+    return len;
+}
+
+static void extract_header_value(const char *head, size_t head_len,
+                                 const char *name, char *out, size_t out_size) {
+    const char *p = head;
+    size_t name_len = strlen(name);
+    out[0] = '\0';
+    while (p && (size_t)(p - head) < head_len) {
+        const char *eol = memchr(p, '\n', (size_t)(head + head_len - p));
+        size_t line_len = eol ? (size_t)(eol - p) : (size_t)(head + head_len - p);
+        size_t trimmed = line_len;
+        while (trimmed > 0 && (p[trimmed - 1] == '\r' || p[trimmed - 1] == '\n')) trimmed--;
+        if (trimmed >= name_len &&
+            strncasecmp(p, name, name_len) == 0 &&
+            (trimmed == name_len || p[name_len] == ':')) {
+            const char *value = p + name_len;
+            if (*value == ':') value++;
+            while (*value == ' ' || *value == '\t') value++;
+            if ((size_t)(p + trimmed - value) < out_size) {
+                memcpy(out, value, (size_t)(p + trimmed - value));
+                out[p + trimmed - value] = '\0';
+            }
+            return;
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+}
+
+enum {
+    OW_FETCH_OK = 0,
+    OW_FETCH_FAIL,
+    OW_FETCH_EMPTY,
+    OW_FETCH_TOOMANY,
+    OW_FETCH_NOREDIR,
+    OW_FETCH_STATUS
+};
+
+static int fetch_url(const char *url, char *body_out, size_t body_cap,
+                     size_t *body_len_out, char *err, size_t err_cap) {
+    char current[4096];
+    char *resp = NULL;
+    size_t resp_cap = body_cap + 4096;
+    int redirects = 0;
+    snprintf(current, sizeof(current), "%s", url);
+    *body_len_out = 0;
+    for (;;) {
+        char host[128] = "", path[512] = "/";
+        unsigned short port = 80;
+        char host_buf[64];
+        struct addrinfo hints, *address = NULL;
+        int fd = -1, status = 0;
+        size_t total = 0, boundary;
+        if (parse_host_port_path(current, host, sizeof(host), &port, path, sizeof(path)) < 0) {
+            snprintf(err, err_cap, "Bad URL: %s", current);
+            if (resp) free(resp);
+            return OW_FETCH_FAIL;
+        }
+        snprintf(host_buf, sizeof(host_buf), "%u", (unsigned)port);
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(host, host_buf, &hints, &address) != 0 || !address) {
+            if (address) freeaddrinfo(address);
+            snprintf(err, err_cap, "IP needed: %s", host);
+            if (resp) free(resp);
+            return OW_FETCH_FAIL;
+        }
+        {
+            struct addrinfo *candidate;
+            for (candidate = address; candidate; candidate = candidate->ai_next) {
+                fd = socket(candidate->ai_family, candidate->ai_socktype,
+                            candidate->ai_protocol);
+                if (fd < 0) continue;
+                if (connect(fd, candidate->ai_addr, candidate->ai_addrlen) < 0) {
+                    close(fd);
+                    fd = -1;
+                    continue;
+                }
+                break;
+            }
+        }
+        freeaddrinfo(address);
+        if (fd < 0) {
+            snprintf(err, err_cap, "IP needed: %s", host);
+            if (resp) free(resp);
+            return OW_FETCH_FAIL;
+        }
+        {
+            char request[1024];
+            int request_len = snprintf(request, sizeof(request),
+                "GET %s HTTP/1.1\r\nHost: %s\r\nAccept: */*\r\n"
+                "Connection: close\r\n\r\n", path, host);
+            send(fd, request, (size_t)request_len, MSG_NOSIGNAL);
+        }
+        if (!resp) {
+            resp = malloc(resp_cap);
+            if (!resp) { close(fd); snprintf(err, err_cap, "Out of memory"); return OW_FETCH_FAIL; }
+        }
+        for (;;) {
+            ssize_t n = recv(fd, resp + total, resp_cap - total, 0);
+            if (n <= 0) break;
+            total += (size_t)n;
+            if (total >= resp_cap) break;
+        }
+        close(fd);
+        if (total == 0) {
+            snprintf(err, err_cap, "No data: %s", host);
+            free(resp);
+            resp = NULL;
+            return OW_FETCH_EMPTY;
+        }
+        status = parse_http_status(resp, total);
+
+        if (status >= 300 && status < 400) {
+            char location[512];
+            char resolved[4096];
+            if (++redirects >= OW_MAX_REDIRECTS) {
+                snprintf(err, err_cap, "Too many redirects");
+                free(resp); resp = NULL;
+                return OW_FETCH_TOOMANY;
+            }
+            extract_header_value(resp, total, "location", location, sizeof(location));
+            if (!resolve_location(current, location, resolved, sizeof(resolved))) {
+                snprintf(err, err_cap, "Redirect without Location");
+                free(resp); resp = NULL;
+                return OW_FETCH_NOREDIR;
+            }
+            snprintf(current, sizeof(current), "%s", resolved);
+            free(resp);
+            resp = NULL;
+            continue;
+        }
+        if (status >= 400) {
+            snprintf(err, err_cap, "HTTP error %d", status);
+            free(resp); resp = NULL;
+            return OW_FETCH_STATUS;
+        }
+
+        boundary = header_body_boundary(resp, total);
+        if (total > boundary) {
+            size_t length = total - boundary;
+            if (length > body_cap) length = body_cap;
+            memcpy(body_out, resp + boundary, length);
+            *body_len_out = length;
+        }
+        free(resp);
+        resp = NULL;
+        return OW_FETCH_OK;
+    }
+}
+
 static void serve_render(int client, const char *request) {
-    char target[4096] = "https://codeos.dev";
+    char target[4096] = "http://www.google.com";
     char decoded[4096], safe_target[8192];
+    char err[192] = "";
+    char *page = NULL;
+    size_t body_len = 0;
+    int code;
     const char *value = strstr(request, "target=");
     if (value) {
         value += 7;
@@ -203,37 +489,51 @@ static void serve_render(int client, const char *request) {
         url_decode(target, decoded, sizeof(decoded));
         snprintf(target, sizeof(target), "%s", decoded);
     }
-    normalize_url(target, decoded, sizeof(decoded));
-    html_escape(decoded, safe_target, sizeof(safe_target));
-    char page[16384];
-    snprintf(page, sizeof(page),
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>OpenWeb secure view</title>"
-        "<style>html,body{width:1024px;height:768px;margin:0}"
-        "body{font-family:sans-serif;background:#1d1e1f;color:#111;position:relative}"
-        ".card{position:absolute;left:192px;top:300px;width:600px;min-height:205px;"
-        "box-sizing:border-box;padding:10px 16px;background:#fff}"
-        "h1{margin:0 0 28px;color:#176aa3;font-size:32px}"
-        "p{margin:0 0 12px;font-size:16px}"
-        ".sample{padding:10px 12px;border:1px solid #c6c6c6;border-radius:9px;background:#fff}"
-        ".note{color:#a36124;font-weight:bold}.link{color:#176aa3}</style></head><body>"
-        "<div class=\"card\"><h1>Hello, tech-for-everyone here</h1>"
-        "<p>OpenWeb renders HTML + CSS through litehtml and draws with Cairo.</p>"
-        "<p class=\"sample\">A rounded, bordered box.</p>"
-        "<p class=\"note\">Cairo surface renderer - JavaScript comes later.</p>"
-        "<p><a class=\"link\" href=\"%.4000s\">Open externally</a></p></div>"
-        "</body></html>", safe_target);
+    ensure_scheme(target, sizeof(target));
+
+    page = malloc(RESPONSE_SIZE);
+    if (!page) {
+        send_text(client, "500 Internal Server Error", "text/plain; charset=utf-8",
+                  "Unable to allocate render surface\n");
+        return;
+    }
+    code = fetch_url(target, page, RESPONSE_SIZE, &body_len, err, sizeof(err));
+    if (code != OW_FETCH_OK) {
+        char safe_err[8192];
+        int written;
+        html_escape(err, safe_err, sizeof(safe_err));
+        html_escape(target, safe_target, sizeof(safe_target));
+        safe_target[256] = '\0';
+        written = snprintf(page, RESPONSE_SIZE,
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            "<title>OpenWeb</title>"
+            "<style>html,body{width:1024px;height:768px;margin:0;font-family:sans-serif}"
+            "body{background:#1d1e1f;color:#111;display:flex;align-items:center;justify-content:center}"
+            ".card{width:600px;box-sizing:border-box;padding:16px 20px;background:#fff}"
+            "h1{margin:0 0 10px;color:#c0392b;font-size:26px}"
+            "p{margin:0 0 8px;font-size:15px;color:#333;word-break:break-all}"
+            "</style></head><body>"
+            "<div class=\"card\"><h1>%s</h1><p>%s</p></div>"
+            "</body></html>",
+            safe_err[0] ? safe_err : "Unknown error", safe_target);
+        body_len = written > 0 && (size_t)written < RESPONSE_SIZE
+                       ? (size_t)written : 0;
+    }
+
     char output_path[] = "/tmp/openweb-render-XXXXXX";
     int output = mkstemp(output_path);
     if (output < 0) {
         send_text(client, "500 Internal Server Error", "text/plain; charset=utf-8",
                   "Unable to create render surface\n");
+        free(page);
         return;
     }
     close(output);
-    if (!render_html_to_png(page, strlen(page), output_path)) {
+    if (!render_html_to_png(page, body_len, output_path)) {
         unlink(output_path);
         send_text(client, "500 Internal Server Error", "text/plain; charset=utf-8",
                   "litehtml could not render the page\n");
+        free(page);
         return;
     }
     FILE *image = fopen(output_path, "rb");
@@ -241,6 +541,7 @@ static void serve_render(int client, const char *request) {
         unlink(output_path);
         send_text(client, "500 Internal Server Error", "text/plain; charset=utf-8",
                   "Unable to open rendered page\n");
+        free(page);
         return;
     }
     fseek(image, 0, SEEK_END);
@@ -250,6 +551,7 @@ static void serve_render(int client, const char *request) {
     size_t bytes_read = pixels ? fread(pixels, 1, (size_t)length, image) : 0;
     fclose(image);
     unlink(output_path);
+    free(page);
     if (!pixels || bytes_read != (size_t)length) {
         free(pixels);
         send_text(client, "500 Internal Server Error", "text/plain; charset=utf-8",
