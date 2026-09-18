@@ -4,6 +4,8 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
+mod ow_render;
+
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
