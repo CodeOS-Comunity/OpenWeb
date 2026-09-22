@@ -117,6 +117,7 @@ extern "C" {
     fn https_get(host: *const c_char, port: u16, path: *const c_char, buf: *mut u8, max_len: u16) -> c_int;
     fn http_post(host: *const c_char, port: u16, path: *const c_char,
                  body: *const u8, body_len: u16, buf: *mut u8, max_len: u16) -> c_int;
+    fn fs_read(path: *const c_char, buf: *mut c_char, max: c_int) -> c_int;
 }
 
 // ── Utility helpers ──
@@ -485,6 +486,63 @@ fn classify_and_fetch_inner(tab_idx: c_int, raw_input: &[u8], body: Option<&[u8]
             }
         }
 
+        /* ── data: URI inline content ── */
+        let url_str = buf_as_str(&final_url);
+        if url_str.starts_with("data:") || url_str.starts_with("data://") {
+            let data_start = if url_str.starts_with("data://") { 7 } else { 5 };
+            let data = &final_url[data_start..];
+            let data_s = buf_as_str(data);
+            /* Find the comma separating the optional MIME from the content */
+            if let Some(comma_pos) = data_s.find(',') {
+                let content = &data_s[comma_pos + 1..];
+                let cl = content.len();
+                let copy_len = if cl < OW_CONTENT_MAX as usize { cl } else { OW_CONTENT_MAX as usize - 1 };
+                let content_bytes = content.as_bytes();
+                t.content[..copy_len].copy_from_slice(&content_bytes[..copy_len]);
+                t.content[copy_len] = 0;
+                t.content_len = copy_len as c_int;
+                set_status(t, b"Loaded (data:)\0");
+                t.loading = 0;
+                t.error = 0;
+                OW_LOAD_PROGRESS = 100;
+                t.scroll = 0;
+                cache_store(&final_url, &t.content[..copy_len]);
+                return;
+            }
+        }
+
+        /* ── file: URI local filesystem ── */
+        if url_str.starts_with("file://") {
+            let path_start = 7; /* skip "file://" */
+            let path_s = buf_as_str(&final_url[path_start..]);
+            /* Convert to NUL-terminated for C fs_read */
+            let mut cpath = [0u8; OW_URL_MAX];
+            let plen = core::cmp::min(path_s.len(), OW_URL_MAX - 1);
+            cpath[..plen].copy_from_slice(&path_s.as_bytes()[..plen]);
+            cpath[plen] = 0;
+            unsafe {
+                let n = fs_read(
+                    cpath.as_ptr() as *const c_char,
+                    t.content.as_mut_ptr() as *mut c_char,
+                    OW_CONTENT_MAX as c_int - 1,
+                );
+                if n > 0 {
+                    t.content_len = n;
+                    t.content[n as usize] = 0;
+                    set_status(t, b"Loaded (file:)\0");
+                    t.error = 0;
+                } else {
+                    t.content_len = 0;
+                    t.error = 5;
+                    set_status(t, b"File not found\0");
+                }
+            }
+            t.loading = 0;
+            OW_LOAD_PROGRESS = 100;
+            t.scroll = 0;
+            return;
+        }
+
         t._redirect_depth = 0;
         let mut redirects: c_int = 0;
 
@@ -552,7 +610,7 @@ fn classify_and_fetch_inner(tab_idx: c_int, raw_input: &[u8], body: Option<&[u8]
                     break;
                 }
                 let mut redir = [0u8; OW_URL_MAX];
-                if !resolve_location(&t.url, extract_header(data, "ocation:"), &mut redir) {
+                if !resolve_location(&t.url, extract_header(data, "Location:"), &mut redir) {
                     set_status(t, b"Redirect without Location\0");
                     t.loading = 0;
                     t.error = 5;
@@ -683,6 +741,7 @@ pub extern "C" fn ow_tab_new(url: *const c_char) {
         if !url.is_null() && *url != 0 {
             c_copy_to_buf(&mut t.url, url);
         } else {
+            /* Default to about:blank - user can navigate elsewhere */
             let blank = b"about:blank\0";
             c_copy_to_buf(&mut t.url, blank.as_ptr() as *const c_char);
         }

@@ -9,6 +9,12 @@
 //!
 //! Entry point: `ow_render_rs(html, len)` (extern "C"), wired into
 //! `ow_core_render_active()` in place of the old C `render_html()`.
+//!
+//! Improvements:
+//! - Word-wrapping at OW_TXT_COLS (120) column boundary via buf_put()
+//! - Link underlining stored in ow_links[] globals
+//! - Enhanced form field rendering with password masking + select display
+//! - Additional inline HTML support: <br>, <p>, <div>, <span>, <br/>
 
 #![allow(static_mut_refs)]
 
@@ -462,6 +468,7 @@ struct St {
     in_title: bool,
     in_row: bool,
     cell_count: i32,
+    blockquote_depth: i32,
 }
 
 impl St {
@@ -491,6 +498,7 @@ impl St {
             in_title: false,
             in_row: false,
             cell_count: 0,
+            blockquote_depth: 0,
         }
     }
 
@@ -578,7 +586,11 @@ impl St {
 
     fn buf_put(&mut self, s: &[u8]) {
         let mut i = 0usize;
-        while i < s.len() && self.col < OW_TXT_COLS - 1 {
+        while i < s.len() {
+            /* If we've reached the column boundary, flush the current line */
+            if self.col >= OW_TXT_COLS - 1 {
+                self.flush_buf();
+            }
             self.buf[self.col] = s[i];
             self.col += 1;
             i += 1;
@@ -686,7 +698,7 @@ impl St {
             self.col += 1;
         }
         if f.typ == OW_FT_SELECT && self.col < OW_TXT_COLS - 1 {
-            self.buf[self.col] = b'v';
+            self.buf[self.col] = b'>';
             self.col += 1;
         }
         if f.typ == OW_FT_SELECT && self.col < OW_TXT_COLS - 1 {
@@ -899,6 +911,36 @@ pub extern "C" fn ow_render_rs(html: *const c_char, len: c_int) {
                         _ => OW_LT_H6,
                     };
                     St::line_set_type(n - 1, t);
+
+                    /* Add underline decoration for H1–H3 */
+                    if st.h_level >= 1 && st.h_level <= 3 {
+                        unsafe {
+                            let ln_idx = (n - 1) as usize;
+                            /* Measure heading text width (scan to NUL) */
+                            let mut tw: usize = 0;
+                            while tw < OW_TXT_COLS - 1 && ow_txt[ln_idx][tw] != 0 {
+                                tw += 1;
+                            }
+                            /* Trim trailing spaces */
+                            while tw > 0 && ow_txt[ln_idx][tw - 1] == b' ' { tw -= 1; }
+                            if tw > 0 && (n as usize) < OW_TXT_LINES {
+                                let uln = n as usize;
+                                let ub: u8 = match st.h_level {
+                                    1 => b'=',
+                                    2 => b'-',
+                                    _ => b'.',
+                                };
+                                let mut k = 0usize;
+                                while k < tw && k < OW_TXT_COLS - 1 {
+                                    ow_txt[uln][k] = ub;
+                                    k += 1;
+                                }
+                                ow_txt[uln][k] = 0;
+                                St::line_set_type(uln as i32, t);
+                                ow_txt_lines = (n + 1) as c_int;
+                            }
+                        }
+                    }
                 }
                 St::add_blank_line();
                 st.h_level = 0;
@@ -992,10 +1034,12 @@ pub extern "C" fn ow_render_rs(html: *const c_char, len: c_int) {
                     if ln < OW_TXT_LINES {
                         let mut k = 0usize;
                         while k < OW_TXT_COLS - 1 {
-                            ow_txt[ln][k] = b'=';
+                            ow_txt[ln][k] = 0xE2;
                             k += 1;
+                            if k < OW_TXT_COLS - 1 { ow_txt[ln][k] = 0x94; k += 1; }
+                            if k < OW_TXT_COLS - 1 { ow_txt[ln][k] = 0x80; k += 1; }
                         }
-                        ow_txt[ln][k] = 0;
+                        ow_txt[ln][OW_TXT_COLS - 1] = 0;
                         St::line_set_type(ln as i32, OW_LT_HR);
                         ow_txt_lines = (ln + 1) as c_int;
                     }
@@ -1007,17 +1051,24 @@ pub extern "C" fn ow_render_rs(html: *const c_char, len: c_int) {
             /* ── blockquote ── */
             if tag_match_exact(html, i, b"blockquote") == 1 {
                 st.flush_buf();
+                st.blockquote_depth += 1;
                 St::add_blank_line();
                 unsafe {
                     let ln = ow_txt_lines as usize;
                     if ln < OW_TXT_LINES {
-                        ow_txt[ln][0] = b'>';
-                        ow_txt[ln][1] = b' ';
-                        ow_txt[ln][2] = 0;
-                        let mut li = 2usize;
-                        while li < OW_TXT_COLS - 1 {
-                            ow_txt[ln][li] = b' ';
+                        /* Prefix with one `>` per nesting level */
+                        let depth = st.blockquote_depth as usize;
+                        let mut li = 0usize;
+                        while li < depth && li * 2 < OW_TXT_COLS - 1 {
+                            ow_txt[ln][li * 2] = b'>';
+                            ow_txt[ln][li * 2 + 1] = b' ';
                             li += 1;
+                        }
+                        ow_txt[ln][li * 2] = 0;
+                        let mut pad = li * 2;
+                        while pad < OW_TXT_COLS - 1 {
+                            ow_txt[ln][pad] = b' ';
+                            pad += 1;
                         }
                         ow_txt[ln][OW_TXT_COLS - 1] = 0;
                         St::line_set_type(ln as i32, OW_LT_BQ);
@@ -1029,6 +1080,7 @@ pub extern "C" fn ow_render_rs(html: *const c_char, len: c_int) {
             }
             if tag_match_exact(html, i, b"blockquote") == 2 {
                 st.flush_buf();
+                if st.blockquote_depth > 0 { st.blockquote_depth -= 1; }
                 St::add_blank_line();
                 i = skip_tag_end(html, i);
                 continue;
@@ -1236,6 +1288,20 @@ pub extern "C" fn ow_render_rs(html: *const c_char, len: c_int) {
                 st.flush_buf();
                 st.in_row = false;
                 st.cell_type = 0;
+                /* Add row separator line for visual clarity */
+                unsafe {
+                    let ln = ow_txt_lines as usize;
+                    if ln < OW_TXT_LINES && st.cell_count > 0 {
+                        let mut k = 0usize;
+                        while k < OW_TXT_COLS - 1 {
+                            ow_txt[ln][k] = b'-';
+                            k += 1;
+                        }
+                        ow_txt[ln][k] = 0;
+                        St::line_set_type(ln as i32, OW_LT_NORMAL);
+                        ow_txt_lines = (ln + 1) as c_int;
+                    }
+                }
                 i = skip_tag_end(html, i);
                 continue;
             }
@@ -1292,9 +1358,7 @@ pub extern "C" fn ow_render_rs(html: *const c_char, len: c_int) {
                                 ow_images[img_idx].h = parse_int(value);
                             } else if name == b"alt" && !value.is_empty() {
                                 let mut w = value.len();
-                                if w > 36 {
-                                    w = 36;
-                                }
+                                if w > 36 { w = 36; }
                                 alt[..w].copy_from_slice(&value[..w]);
                                 alt[w] = 0;
                             }
@@ -1305,15 +1369,39 @@ pub extern "C" fn ow_render_rs(html: *const c_char, len: c_int) {
                             St::line_set_type(ln as i32, OW_LT_IMAGE);
                             let mut ai = 0usize;
                             if alt[0] != 0 {
-                                st_img_mark(&mut ow_txt[ln], &mut ai, b"[I] ");
+                                st_img_mark(&mut ow_txt[ln], &mut ai, b"[\xE2\x9C\x89] ");
                                 let mut bi = 0usize;
                                 while alt[bi] != 0 && ai < OW_TXT_COLS - 1 && bi < alt.len() {
                                     ow_txt[ln][ai] = alt[bi];
                                     ai += 1;
                                     bi += 1;
                                 }
+                                /* Append dimensions if available */
+                                let iw = ow_images[img_idx].w;
+                                let ih = ow_images[img_idx].h;
+                                if iw > 0 && ih > 0 && ai + 8 < OW_TXT_COLS {
+                                    ow_txt[ln][ai] = b' ';
+                                    ai += 1;
+                                    ow_txt[ln][ai] = b'(';
+                                    ai += 1;
+                                    let mut tmp = iw;
+                                    let mut dig = [0u8; 6];
+                                    let mut nd = 0;
+                                    if tmp == 0 { dig[0] = b'0'; nd = 1; }
+                                    else { while tmp > 0 && nd < 6 { dig[nd] = b'0' + (tmp % 10) as u8; tmp /= 10; nd += 1; } }
+                                    while nd > 0 && ai < OW_TXT_COLS - 4 { nd -= 1; ow_txt[ln][ai] = dig[nd]; ai += 1; }
+                                    ow_txt[ln][ai] = b'x';
+                                    ai += 1;
+                                    tmp = ih;
+                                    nd = 0;
+                                    if tmp == 0 { dig[0] = b'0'; nd = 1; }
+                                    else { while tmp > 0 && nd < 6 { dig[nd] = b'0' + (tmp % 10) as u8; tmp /= 10; nd += 1; } }
+                                    while nd > 0 && ai < OW_TXT_COLS - 2 { nd -= 1; ow_txt[ln][ai] = dig[nd]; ai += 1; }
+                                    ow_txt[ln][ai] = b')';
+                                    ai += 1;
+                                }
                             } else {
-                                st_img_mark(&mut ow_txt[ln], &mut ai, b"[IMG]");
+                                st_img_mark(&mut ow_txt[ln], &mut ai, b"[\xE2\x9C\x89]");
                             }
                             ow_txt[ln][ai] = 0;
                             ow_line_img[ln] = img_idx as c_int;
@@ -1791,6 +1879,17 @@ pub extern "C" fn ow_render_rs(html: *const c_char, len: c_int) {
         if st.in_pre {
             if html[i] == b'\n' {
                 st.flush_buf();
+                i += 1;
+                continue;
+            }
+            if html[i] == b'\t' {
+                /* Expand tab to next 8-column boundary */
+                let mut spaces = 8 - (st.col % 8);
+                while spaces > 0 && st.col < OW_TXT_COLS - 1 {
+                    st.buf[st.col] = b' ';
+                    st.col += 1;
+                    spaces -= 1;
+                }
                 i += 1;
                 continue;
             }
