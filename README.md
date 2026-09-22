@@ -80,6 +80,12 @@ cargo build --release --target x86_64-unknown-none
 The CodeOS kernel links this library (with `rust_ow` symbols referenced from
 C shims) when building `zircond`.
 
+`native/` carries the full `rust_ow` git history (merged with the `ours`
+strategy, so the working tree is exactly the mirrored sources): the commits
+`2d39549`, `3f39fa0`, and `74de3d1` are reachable from this repository, and
+the CodeOS tree's `kernel/kernel/rust_ow` gitlink points at `74de3d1`.
+Fetch this repo, then `git checkout 74de3d1` to reproduce that exact state.
+
 ## CodeOS-it status
 
 The public CodeOS repositories currently provide a prebuilt kernel image and do
