@@ -1896,8 +1896,8 @@ namespace canvas_ity
         int   os2ver   = unsigned_16(face.data, face.os_2);
         float sxHeight = os2ver >= 2 ? (float) signed_16(face.data, face.os_2 + 86) : 0;
 
-        ascent  = (int) ceil(sTypoAscender * face.scale);
-        descent = (int) ceil(-sTypoDescender * face.scale);
+        ascent  = (int) ceil((double)sTypoAscender * (double)face.scale);
+        descent = (int) ceil((double)-sTypoDescender * (double)face.scale);
 
         // https://www.w3.org/TR/css-inline/#font-line-gap
         // https://www.w3.org/TR/css-inline/#inline-height
@@ -1905,9 +1905,9 @@ namespace canvas_ity
         // both OS/2 sTypoLineGap and hhea lineGap are either 0 or very small (I used https://fontdrop.info/ viewer).
         // cairo container sets height to ascent + descent, litehtml uses this value as a normal line height and for
         // baseline calculations.
-        height = (int) ceil((sTypoAscender - sTypoDescender) * face.scale);
+        height = (int) ceil((double)(sTypoAscender - sTypoDescender) * (double)face.scale);
 
-        x_height = (int) ceil(sxHeight * face.scale);
+        x_height = (int) ceil((double)sxHeight * (double)face.scale);
     }
 
     // Convert a text string to a set of polylines.  This works out the placement
@@ -2831,9 +2831,9 @@ namespace canvas_ity
         inverse                = identity;
         set_color(fill_style, 0.0f, 0.0f, 0.0f, 1.0f);
         set_color(stroke_style, 0.0f, 0.0f, 0.0f, 1.0f);
-        for(unsigned short y = 0; y < size_y; ++y)
+        for(size_t y = 0; y < size_y; ++y)
         {
-            pixel_run piece_1 = {0, y, 1.0f};
+            pixel_run piece_1 = {0, (unsigned short)y, 1.0f};
             pixel_run piece_2 = {static_cast<unsigned short>(size_x), y, -1.0f};
             mask.push_back(piece_1);
             mask.push_back(piece_2);

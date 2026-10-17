@@ -2932,7 +2932,7 @@ _image_read_raw (csi_t *ctx,
 	data = cairo_image_surface_get_data (image);
     } else {
 	stride = cairo_format_stride_for_width (format, width);
-	data = malloc (stride * height);
+	data = malloc ((size_t)stride * height);
 	if (data == NULL)
 	    return CAIRO_STATUS_NO_MEMORY;
 
@@ -5439,7 +5439,7 @@ _set_source_image (csi_t *ctx)
 	    cairo_surface_flush (surface);
 	    memcpy (cairo_image_surface_get_data (surface),
 		    cairo_image_surface_get_data (source),
-		    cairo_image_surface_get_height (source) * cairo_image_surface_get_stride (source));
+		     (size_t)cairo_image_surface_get_height (source) * cairo_image_surface_get_stride (source));
 	    cairo_surface_mark_dirty (surface);
 	}
     } else {

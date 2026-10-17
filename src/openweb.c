@@ -155,7 +155,7 @@ static void serve_file(int client, const char *path) {
    URL classification — mirrors kernel/kernel/rust_ow/src/lib.rs
    (is_unreserved / has_known_scheme / is_likely_url / ensure_scheme).
    A bare word with no dot is a search query; a dotted/hosted string or a
-   known scheme is navigated directly with an "http://" scheme default.
+   known scheme is navigated directly with an "https://" scheme default.
    ═══════════════════════════════════════════════════════════════════ */
 
 static int is_unreserved(char c) {
@@ -183,9 +183,9 @@ static void ensure_scheme(char *url, size_t size) {
     size_t len;
     if (!url[0] || has_known_scheme(url)) return;
     len = strlen(url);
-    if (len + 7 >= size) return;
-    memmove(url + 7, url, len + 1);
-    memcpy(url, "http://", 7);
+    if (len + 8 >= size) return;
+    memmove(url + 8, url, len + 1);
+    memcpy(url, "https://", 8);
 }
 
 /* RFC 3986 percent-encoding of a query string — same rule as rust_ow's
@@ -206,7 +206,7 @@ static void percent_encode_query(const char *input, char *output, size_t output_
 }
 
 /* Search URL builder. Defaults to the same Google endpoint as the kernel
- * (http://www.google.com/search?q=). "ddg" is an opt-in alternative. */
+ * (https://www.google.com/search?q=). "ddg" is an opt-in alternative. */
 static void build_engine_url(const char *query, const char *engine,
                              char *url, size_t url_size) {
     char encoded[2000];
@@ -214,7 +214,7 @@ static void build_engine_url(const char *query, const char *engine,
     if (strcmp(engine, "ddg") == 0)
         snprintf(url, url_size, "https://duckduckgo.com/html/?q=%s", encoded);
     else
-        snprintf(url, url_size, "http://www.google.com/search?q=%s", encoded);
+        snprintf(url, url_size, "https://www.google.com/search?q=%s", encoded);
 }
 
 static void serve_search(int client, const char *body) {
@@ -231,7 +231,7 @@ static void serve_search(int client, const char *body) {
     }
     char response[8192];
     int direct = is_likely_url(query);
-    const char *selected_engine = direct ? (strncmp(url, "https://", 8) == 0 ? "https" : "http")
+    const char *selected_engine = direct ? "https"
                                          : (strcmp(engine, "ddg") == 0 ? "duckduckgo" : "google");
     const char *mode = direct ? "direct" : "search";
     char safe_query[4096], safe_url[8192];
@@ -476,7 +476,7 @@ static int fetch_url(const char *url, char *body_out, size_t body_cap,
 }
 
 static void serve_render(int client, const char *request) {
-    char target[4096] = "http://www.google.com";
+    char target[4096] = "https://www.google.com";
     char decoded[4096], safe_target[8192];
     char err[192] = "";
     char *page = NULL;

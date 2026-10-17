@@ -178,7 +178,7 @@ _cairo_boilerplate_image_create_similar (cairo_surface_t *other,
     }
 
     stride = cairo_format_stride_for_width(format, width);
-    ptr = _cairo_malloc (stride * height);
+    ptr = _cairo_malloc ((size_t)stride * height);
 
     surface = cairo_image_surface_create_for_data (ptr, format,
 						   width, height, stride);
@@ -227,7 +227,7 @@ _cairo_boilerplate_image16_create_similar (cairo_surface_t *other,
     }
 
     stride = cairo_format_stride_for_width(format, width);
-    ptr = _cairo_malloc (stride * height);
+    ptr = _cairo_malloc ((size_t)stride * height);
 
     surface = cairo_image_surface_create_for_data (ptr, format,
 						   width, height, stride);

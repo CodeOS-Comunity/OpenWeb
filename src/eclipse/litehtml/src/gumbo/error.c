@@ -178,12 +178,12 @@ void gumbo_error_to_string(
   switch (error->type) {
     case GUMBO_ERR_UTF8_INVALID:
       print_message(
-          parser, output, "Invalid UTF8 character 0x%x", error->v.codepoint);
+          parser, output, "Invalid UTF8 character 0x%x", (unsigned int)error->v.codepoint);
       break;
     case GUMBO_ERR_UTF8_TRUNCATED:
       print_message(parser, output,
           "Input stream ends with a truncated UTF8 character 0x%x",
-          error->v.codepoint);
+          (unsigned int)error->v.codepoint);
       break;
     case GUMBO_ERR_NUMERIC_CHAR_REF_NO_DIGITS:
       print_message(
@@ -193,13 +193,13 @@ void gumbo_error_to_string(
       print_message(parser, output,
           "The numeric character reference &#%d should be followed "
           "by a semicolon",
-          error->v.codepoint);
+          (int)error->v.codepoint);
       break;
     case GUMBO_ERR_NUMERIC_CHAR_REF_INVALID:
       print_message(parser, output,
           "The numeric character reference &#%d; encodes an invalid "
           "unicode codepoint",
-          error->v.codepoint);
+          (int)error->v.codepoint);
       break;
     case GUMBO_ERR_NAMED_CHAR_REF_WITHOUT_SEMICOLON:
       // The textual data came from one of the literal strings in the table, and

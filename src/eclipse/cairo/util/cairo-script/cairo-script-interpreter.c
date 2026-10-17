@@ -141,7 +141,7 @@ _csi_slab_alloc (csi_t *ctx, int size)
 
 	chunk = _csi_alloc (ctx,
 			    sizeof (csi_chunk_t) +
-			    cnt * chunk_size * 2 * sizeof (void *));
+			    (size_t)cnt * chunk_size * 2 * sizeof (void *));
 	if (_csi_unlikely (chunk == NULL))
 	    return NULL;
 
