@@ -975,6 +975,7 @@ cairo_pdf_interchange_write_link_action (cairo_pdf_surface_t   *surface,
 				     "      /F %s\n",
 				     dest);
 	free (dest);
+	dest = NULL;
 
 	if (surface->pdf_version >= CAIRO_PDF_VERSION_1_7)
 	{
@@ -986,6 +987,7 @@ cairo_pdf_interchange_write_link_action (cairo_pdf_surface_t   *surface,
 				     "      /UF %s\n",
 				     dest);
 	    free (dest);
+	    dest = NULL;
 	}
 
 	if (link_attrs->dest) {
@@ -997,6 +999,7 @@ cairo_pdf_interchange_write_link_action (cairo_pdf_surface_t   *surface,
 					 "      /D %s\n",
 					 dest);
 	    free (dest);
+	    dest = NULL;
 	} else {
 	    if (link_attrs->has_pos) {
 		_cairo_output_stream_printf (surface->object_stream.stream,
