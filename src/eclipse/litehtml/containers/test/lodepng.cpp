@@ -5850,10 +5850,10 @@ static unsigned postProcessScanlines(unsigned char* out, unsigned char* in, unsi
 
     if(info_png->interlace_method == 0)
     {
-        if(bpp < 8 && w * bpp != ((w * bpp + 7u) / 8u) * 8u)
+        if(bpp < 8 && (size_t)w * bpp != (((size_t)w * bpp + 7u) / 8u) * 8u)
         {
             CERROR_TRY_RETURN(unfilter(in, in, w, h, bpp));
-            removePaddingBits(out, in, w * bpp, ((w * bpp + 7u) / 8u) * 8u, h);
+            removePaddingBits(out, in, (size_t)w * bpp, (((size_t)w * bpp + 7u) / 8u) * 8u, h);
         }
         /*we can immediately filter into the out buffer, no other steps needed*/
         else
