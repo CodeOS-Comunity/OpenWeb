@@ -541,37 +541,42 @@ cairo_status_t
 _cairo_gstate_set_dash (cairo_gstate_t *gstate, const double *dash, int num_dashes, double offset)
 {
     double dash_total, on_total, off_total;
-    int i, j;
+    double *dashes;
+    int i, j, num_out;
 
-    free (gstate->stroke_style.dash);
-
-    gstate->stroke_style.num_dashes = num_dashes;
-
-    if (gstate->stroke_style.num_dashes == 0) {
+    if (num_dashes == 0) {
+	free (gstate->stroke_style.dash);
 	gstate->stroke_style.dash = NULL;
+	gstate->stroke_style.num_dashes = 0;
 	gstate->stroke_style.dash_offset = 0.0;
 	return CAIRO_STATUS_SUCCESS;
     }
 
-    gstate->stroke_style.dash = _cairo_malloc_ab (gstate->stroke_style.num_dashes, sizeof (double));
-    if (unlikely (gstate->stroke_style.dash == NULL)) {
-	gstate->stroke_style.num_dashes = 0;
+    /* Build the replacement array before releasing the old one: `dash` is
+     * allowed to alias gstate->stroke_style.dash, so free()ing the old array
+     * up front would leave `dash` dangling for the copy loop below. */
+    dashes = _cairo_malloc_ab (num_dashes, sizeof (double));
+    if (unlikely (dashes == NULL))
 	return _cairo_error (CAIRO_STATUS_NO_MEMORY);
-    }
 
+    num_out = num_dashes;
     on_total = off_total = dash_total = 0.0;
     for (i = j = 0; i < num_dashes; i++) {
-	if (dash[i] < 0)
+	if (dash[i] < 0) {
+	    free (dashes);
 	    return _cairo_error (CAIRO_STATUS_INVALID_DASH);
+	}
 
 	if (dash[i] == 0 && i > 0 && i < num_dashes - 1) {
-	    if (dash[++i] < 0)
+	    if (dash[++i] < 0) {
+		free (dashes);
 		return _cairo_error (CAIRO_STATUS_INVALID_DASH);
+	    }
 
-	    gstate->stroke_style.dash[j-1] += dash[i];
-	    gstate->stroke_style.num_dashes -= 2;
+	    dashes[j-1] += dash[i];
+	    num_out -= 2;
 	} else
-	    gstate->stroke_style.dash[j++] = dash[i];
+	    dashes[j++] = dash[i];
 
 	if (dash[i]) {
 	    dash_total += dash[i];
@@ -582,18 +587,21 @@ _cairo_gstate_set_dash (cairo_gstate_t *gstate, const double *dash, int num_dash
 	}
     }
 
-    if (dash_total == 0.0)
+    if (dash_total == 0.0) {
+	free (dashes);
 	return _cairo_error (CAIRO_STATUS_INVALID_DASH);
+    }
 
     /* An odd dash value indicate symmetric repeating, so the total
      * is twice as long. */
-    if (gstate->stroke_style.num_dashes & 1) {
+    if (num_out & 1) {
 	dash_total *= 2;
 	on_total += off_total;
     }
 
     if (dash_total - on_total < CAIRO_FIXED_ERROR_DOUBLE) {
 	/* Degenerate dash -> solid line */
+	free (dashes);
 	free (gstate->stroke_style.dash);
 	gstate->stroke_style.dash = NULL;
 	gstate->stroke_style.num_dashes = 0;
@@ -609,6 +617,10 @@ _cairo_gstate_set_dash (cairo_gstate_t *gstate, const double *dash, int num_dash
 	offset += dash_total;
     if (offset <= 0.0)		/* Take care of -0 */
 	offset = 0.0;
+
+    free (gstate->stroke_style.dash);
+    gstate->stroke_style.dash = dashes;
+    gstate->stroke_style.num_dashes = num_out;
     gstate->stroke_style.dash_offset = offset;
 
     return CAIRO_STATUS_SUCCESS;
